@@ -1,28 +1,19 @@
 # -*- mode: python; coding: utf-8 -*-
 
 """
-Tornado Memcached
+Protocol. A Base class to implement cached protocols
 """
 
-import weakref
-import socket
-import time
-import logging
+from __future__ import absolute_import
+
 import itertools
 import functools
-import collections
 
-# For MC url parsing
-try:
-    import urlparse  # py2
-except ImportError:
-    basestring = str
-    import urllib.parse as urlparse  # py3
-
-from tornado import iostream
 from tornado import stack_context
-from tornado.ioloop import IOLoop
 from tornado.gen import engine, Task
+
+# Local requirements
+from torncache.protocol import ProtocolMixin
 
 VALID_STORE_RESULTS = {
     'set':     ('STORED',),
@@ -63,14 +54,6 @@ class MemcacheError(Exception):
     "Base exception class"
 
 
-class MemcachePoolError(MemcacheError):
-    """Raised when number of clients excees size"""
-
-
-class MemcacheTimeoutError(MemcacheError):
-    """Timeout when connecting or running and operation"""
-
-
 class MemcacheClientError(MemcacheError):
     """Raised when memcached fails to parse the arguments to a request, likely
     due to a malformed key and/or value, a bug in this library, or a version
@@ -102,177 +85,14 @@ class MemcacheUnexpectedCloseError(MemcacheServerError):
     "Raised when the connection with memcached closes unexpectedly."
 
 
-class ClientPool(object):
-    """A Pool of clients"""
+class MemcachedProtocol(ProtocolMixin):
 
-    class _BroadCast(object):
-        """
-        A Private decorator to broadcast some calls like flush_all to all
-        servers
-        """
-        def __init__(self, pool):
-            self.pool = pool
+    SCHEMES = ['mc', 'memcached']
+    DEFAULT_PORT = 11211
 
-        def __getattr__(self, name):
-            if hasattr(Client, name):
-                return functools.partial(self._invoke, name)
-            # raise AttributeError
-            raise AttributeError(name)
-
-        def _invoke(self, cmd, *args, **kwargs):
-            def on_finish(response, host, _cb):
-                retval[host] = response
-                if len(retval) == len(self.pool._servers):
-                    _cb and _cb(retval)
-            # invoke and collect results
-            retval = {}
-            cb = kwargs.get('callback')
-            for host, _ in self.pool._servers:
-                kwargs['callback'] = functools.partial(on_finish, host, _cb=cb)
-                func = functools.partial(getattr(self.pool, cmd), host)
-                func(*args, **kwargs)
-
-    def __init__(self, servers, size=0, **kwargs):
-        self._servers = self._parse_servers(servers)
-        self._size = size
-        self._used = collections.deque()
-        self._clients = collections.deque()
-        # Client arguments
-        self._kwargs = kwargs
-
-    @staticmethod
-    def _parse_servers(servers):
-        _servers = servers or []
-        # Parse servers if it's a collection of urls
-        if isinstance(servers, basestring):
-            _servers = []
-            for server in servers.split(','):
-                # parse url form 'mc://host:port?<weight>='
-                if servers.startswith('mc'):
-                    url = urlparse.urlsplit(server)
-                    server = url.netloc
-                    if url.query:
-                        weight = urlparse.parse_qs(url.query).get('weight', 1)
-                        server = [server, weight]
-                _servers.append(server)
-        # add port to tuples if missing
-        retval = {}
-        for host in _servers:
-            weight, port = 1, 11211
-            # extract host and weight from tuple
-            if not isinstance(host, basestring):
-                if len(host) > 1:
-                    weight = host[1]
-                host = host[0]
-            # extract host and port
-            if ':' in host:
-                host, _, port = host.partition(':')
-            # resolve host
-            candidates = socket.getaddrinfo(
-                host, port,
-                socket.AF_INET, socket.SOCK_STREAM)
-            for candidate in candidates:
-                host = "{0}:{1}".format(*candidate[4])
-                weight = retval.get(host, weight - 1)
-                retval[host] = weight + 1
-        # Return well formatted list of servers
-        return retval.items()
-
-    def _create_clients(self, n):
-        return [Client(self._servers, **self._kwargs) for x in xrange(n)]
-
-    def _invoke(self, cmd, *args, **kwargs):
-        def on_finish(response, c, _cb, **kwargs):
-            self._used.remove(c)
-            self._clients.append(c)
-            _cb and _cb(response, **kwargs)
-        if not self._clients:
-            # Add a new client
-            total_clients = len(self._clients) + len(self._used)
-            if self._size > 0 and total_clients >= self._size:
-                error = "Max of %d clients is already reached" % self._size
-                raise MemcachePoolError(error)
-            self._clients.append(*self._create_clients(1))
-        # fetch available one
-        client = self._clients.popleft()
-        self._used.append(client)
-        # override used callback to
-        cb = kwargs.get('callback')
-        kwargs['callback'] = functools.partial(on_finish, c=client, _cb=cb)
-        getattr(client, cmd)(*args, **kwargs)
-
-    def __getattr__(self, name):
-        if hasattr(Client, name):
-            return functools.partial(self._invoke, name)
-        if name == 'broadcast':
-            return self._BroadCast(self)
-        # raise error
-        raise AttributeError(name)
-
-
-class Client(object):
-    """
-    Object representing a pool of memcache servers.
-    """
-
-    CLIENTS = weakref.WeakKeyDictionary()
-
-    def __init__(self, servers, ioloop=None,
-                 serializer=None, deserializer=None,
-                 connect_timeout=5, timeout=1, no_delay=True,
-                 ignore_exc=True, dead_retry=30,
-                 server_retries=10):
-
-        # Watcher to destroy client when ioloop expires
-        self._ioloop = ioloop or IOLoop.instance()
-        self.CLIENTS[self._ioloop] = self
-
-        self._server_retries = server_retries
-        self._server_args = {
-            'ioloop': self._ioloop,
-            'serializer': serializer,
-            'deserializer': deserializer,
-            'connect_timeout': connect_timeout,
-            'timeout': timeout,
-            'no_delay': no_delay,
-            'ignore_exc': ignore_exc,
-            'dead_retry': dead_retry
-        }
-
-        # servers
-        self._servers = []
-        self._buckets = []
-        # Servers can be passed in two forms:
-        #    1. Strings of the form C{"host:port"}, which implies a
-        #    default weight of 1.
-        #    2. Tuples of the form C{("host:port", weight)}, where C{weight} is
-        #    an integer weight value.
-        for server in servers:
-            server = Connection(server, **self._server_args)
-            for i in xrange(server.weight):
-                self._buckets.append(server)
-            self._servers.append(server)
-
-    def _find_server(self, value):
-        """Find a server from a string"""
-        if isinstance(value, Connection):
-            return value
-        # check if server is an address
-        for candidate in self._servers:
-            if str(candidate) == value:
-                return candidate
-        # try with a key
-        return self._get_server(value)[0]
-
-    def _get_server(self, key):
-        """Fetch valid MC for this key"""
-        serverhash = 0
-        if isinstance(key, tuple):
-            serverhash, key = key[:2]
-        elif len(self._buckets) > 1:
-            serverhash = hash(key)
-        # get pair server, key
-        return (self._buckets[serverhash % len(self._buckets)], key)
+    def __init__(self, *args, **kwargs):
+        super(MemcachedProtocol, self).__init__(*args, **kwargs)
+        self.parser = MemcachedParser
 
     def set(self, key, value, expire=0, noreply=True, callback=None):
         """
@@ -296,7 +116,8 @@ class Client(object):
             callback and callback(None)
             return
         # invoke
-        server.store_cmd('set', key, expire, noreply, value, None, callback)
+        self.parser.store_cmd(
+            server, 'set', key, expire, noreply, value, None, callback)
 
     def set_many(self, values, expire=0, noreply=True, callback=None):
         """A convenience function for setting multiple values.
@@ -361,7 +182,8 @@ class Client(object):
             callback and callback(None)
             return
         # invoke
-        server.store_cmd('add', key, expire, noreply, value, None, callback)
+        self.parser.store_cmd(
+            server, 'add', key, expire, noreply, value, None, callback)
 
     def replace(self, key, value, expire=0, noreply=True, callback=None):
         """
@@ -385,7 +207,8 @@ class Client(object):
             callback and callback(None)
             return
         # invoke
-        server.store_cmd('replace', key, expire, noreply, value, None, callback)
+        self.parser.store_cmd(
+            server, 'replace', key, expire, noreply, value, None, callback)
 
     def append(self, key, value, expire=0, noreply=True, callback=None):
         """
@@ -407,7 +230,8 @@ class Client(object):
             callback and callback(None)
             return
         # invoke
-        server.store_cmd('append', key, expire, noreply, value, None, callback)
+        self.parser.store_cmd(
+            server, 'append', key, expire, noreply, value, None, callback)
 
     def prepend(self, key, value, expire=0, noreply=True, callback=None):
         """
@@ -428,7 +252,8 @@ class Client(object):
             callback and callback(None)
             return
         # invoke
-        server.store_cmd('prepend', key, expire, noreply, value, None, callback)
+        self.parser.store_cmd(
+            server, 'prepend', key, expire, noreply, value, None, callback)
 
     def cas(self, key, value, cas, expire=0, noreply=False, callback=None):
         """
@@ -452,7 +277,8 @@ class Client(object):
             callback and callback(None)
             return
         # invoke
-        server.store_cmd('cas', key, expire, noreply, value, cas, callback)
+        self.parser.store_cmd(
+            server, 'cas', key, expire, noreply, value, cas, callback)
 
     def get(self, key, callback):
         """
@@ -470,7 +296,7 @@ class Client(object):
             return
 
         cb = lambda x: callback(x.get(key, None))
-        server.fetch_cmd('get', [key], False, callback=cb)
+        self.parser.fetch_cmd(server, 'get', [key], False, callback=cb)
 
     def get_many(self, keys, callback):
         """
@@ -509,7 +335,7 @@ class Client(object):
                 on_response(server, result)
                 continue
             cb = stack_context.wrap(functools.partial(on_response, server))
-            server.fetch_cmd('get', keys, False, callback=cb)
+            self.parser.fetch_cmd(server, 'get', keys, False, callback=cb)
 
     def gets(self, key, callback):
         """
@@ -527,7 +353,7 @@ class Client(object):
             return
 
         cb = lambda x: callback(x.get(key, (None, None)))
-        server.fetch_cmd('gets', [key], True, callback=cb)
+        self.parser.fetch_cmd(server, 'gets', [key], True, callback=cb)
 
     def gets_many(self, keys, callback):
         """
@@ -566,7 +392,7 @@ class Client(object):
                 on_response(server, result)
                 continue
             cb = stack_context.wrap(functools.partial(on_response, server))
-            server.fetch_cmd('gets', keys, True, callback=cb)
+            self.parser.fetch_cmd(server, 'gets', keys, True, callback=cb)
 
     def delete(self, key, time=0, noreply=True, callback=None):
         """
@@ -594,7 +420,7 @@ class Client(object):
 
         # invoke
         cb = callback if noreply else stack_context.wrap(on_response)
-        server.misc_cmd(cmd, 'delete', noreply, callback=cb)
+        self.parser.misc_cmd(server, cmd, 'delete', noreply, callback=cb)
 
     def delete_many(self, keys, noreply=True, callback=None):
         """
@@ -659,7 +485,7 @@ class Client(object):
 
         # invoke
         cb = callback if noreply else stack_context.wrap(on_response)
-        server.misc_cmd(cmd, 'incr', noreply, callback=cb)
+        self.parser.misc_cmd(server, cmd, 'incr', noreply, callback=cb)
 
     def decr(self, key, value, noreply=False, callback=None):
         """
@@ -689,7 +515,7 @@ class Client(object):
 
         # invoke
         cb = callback if noreply else stack_context.wrap(on_response)
-        server.misc_cmd(cmd, 'decr', noreply, callback=cb)
+        self.parser.misc_cmd(server, cmd, 'decr', noreply, callback=cb)
 
     def touch(self, key, expire=0, noreply=True, callback=None):
         """
@@ -719,7 +545,7 @@ class Client(object):
 
         # invoke
         cb = callback if noreply else stack_context.wrap(on_response)
-        server.misc_cmd(cmd, 'touch', noreply, callback=cb)
+        self.parser.misc_cmd(server, cmd, 'touch', noreply, callback=cb)
 
     def stats(self, server, *args, **kwargs):
         """
@@ -754,7 +580,7 @@ class Client(object):
 
         # invoke
         cb = stack_context.wrap(on_response)
-        server.fetch_cmd('stats', args, False, callback=cb)
+        self.parser.fetch_cmd(server, 'stats', args, False, callback=cb)
 
     def flush_all(self, server, delay=0, noreply=True, callback=None):
         """
@@ -763,7 +589,8 @@ class Client(object):
         Args:
           delay: optional int, the number of seconds to wait before flushing,
                  or zero to flush immediately (the default).
-          noreply: optional bool, True to not wait for the response (the default).
+          noreply: optional bool, True to not wait for the response
+                 (the default).
 
         Returns:
           True.
@@ -782,7 +609,7 @@ class Client(object):
 
         # invoke
         cb = callback if noreply else stack_context.wrap(on_response)
-        server.misc_cmd(cmd, 'flush_all', noreply, callback=cb)
+        self.parser.misc_cmd(server, cmd, 'flush_all', noreply, callback=cb)
 
     def quit(self, server, callback=None):
         """
@@ -803,54 +630,13 @@ class Client(object):
 
         cmd = "quit\r\n"
         cb = stack_context.wrap(on_response)
-        server.misc_cmd(cmd, 'quit', True, callback=cb)
+        self.parser.misc_cmd(server, cmd, 'quit', True, callback=cb)
 
 
-class Connection:
-    """ A Client connection to a Server"""
+class MemcachedParser(object):
 
-    def __init__(self, host, ioloop=None, serializer=None, deserializer=None,
-                 connect_timeout=5, timeout=1, no_delay=True, ignore_exc=False,
-                 dead_retry=30):
-
-        # Parse host conf and weight
-        self.weight = 1
-        if isinstance(host, tuple):
-            host, self.weight = host
-
-        # Parse host port
-        self.ip, self.port = host, 11211
-        if ":" in host:
-            self.ip, _, self.port = host.partition(":")
-            self.port = int(self.port)
-
-        # Protected data
-        self._ioloop = ioloop or IOLoop.instance()
-        self._ignore_exc = ignore_exc
-
-        # Timeouts
-        self._timeout = None
-        self._request_timeout = timeout
-        self._connect_timeout = connect_timeout
-
-        # Data
-        self._serializer = serializer
-        self._deserializer = deserializer
-
-        # Connections properites
-        self._stream = None
-        self._no_delay = no_delay
-        self._dead_until = 0
-        self._dead_retry = dead_retry
-        self._connect_callbacks = []
-
-    def __str__(self):
-        retval = "%s:%d" % (self.ip, self.port)
-        if self._dead_until:
-            retval += " (dead until %d)" % self._dead_until
-        return retval
-
-    def _raise_errors(self, line, name):
+    @staticmethod
+    def _raise_errors(line, name):
         if line.startswith('ERROR'):
             raise MemcacheUnknownCommandError(name)
 
@@ -862,95 +648,9 @@ class Connection:
             error = line[line.find(' ') + 1:]
             raise MemcacheServerError(error)
 
-    def _add_timeout(self, reason):
-        """Add a timeout handler"""
-        def on_timeout():
-            self._timeout = None
-            self.mark_dead(reason)
-            raise MemcacheTimeoutError(reason)
-
-        if self._request_timeout:
-            self._clear_timeout()
-            self._timeout = self._ioloop.add_timeout(
-                time.time() + self._request_timeout,
-                stack_context.wrap(on_timeout))
-
-    def _clear_timeout(self):
-        if self._timeout is not None:
-            self._ioloop.remove_timeout(self._timeout)
-            self._timeout = None
-
-    def mark_dead(self, reason):
-        """Quarintine MC server for a period of time"""
-        if self._dead_until < time.time():
-            logging.warning("Marking dead %s: '%s'" % (self, reason))
-            self._dead_until = time.time() + self._dead_retry
-            self._clear_timeout()
-            self.close()
-
-    def connect(self, callback=None):
-        """Open a connection to MC server"""
-
-        def on_timeout(reason):
-            self._timeout = None
-            self.mark_dead(reason)
-            raise MemcacheTimeoutError(reason)
-
-        def on_close():
-            self._clear_timeout()
-            if self._stream and self._stream.error:
-                error = self._stream.error
-                self._stream = None
-                if self._connect_callbacks:
-                    self._connect_callbacks = None
-                    raise error
-                logging.error(self._stream.error)
-
-        def on_connect():
-            self._clear_timeout()
-            for callback in self._connect_callbacks:
-                callback and callback(self)
-            self._connect_callbacks = None
-
-        # Check if server is dead
-        if self._dead_until > time.time():
-            msg = "Server {0} will stay dead next {1} secs"
-            msg = msg.format(self, self._dead_until - time.time())
-            raise MemcacheClientError(msg)
-        self._dead_until = 0
-
-        # Check we are already connected
-        if self._connect_callbacks is None:
-            callback and callback(self)
-            return
-        self._connect_callbacks.append(callback)
-        if self._stream and not self._stream.closed():
-            return
-
-        # Connection closed. clean and start again
-        self.close()
-
-        # Set timeout
-        if self._connect_timeout:
-            timeout_func = functools.partial(on_timeout, "Connection Timeout")
-            self._timeout = self._ioloop.add_timeout(
-                time.time() + self._connect_timeout,
-                stack_context.wrap(timeout_func))
-
-        # now connect
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        if self._no_delay:
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        self._stream = iostream.IOStream(sock, io_loop=self._ioloop)
-        self._stream.set_close_callback(on_close)
-        self._stream.connect((self.ip, self.port), callback=on_connect)
-
-    def send(self, cmd, callback):
-        """Send a MC command"""
-        self._stream.write(cmd + "\r\n", callback)
-
+    @staticmethod
     @engine
-    def fetch_cmd(self, name, keys, expect_cas, callback):
+    def fetch_cmd(conn, name, keys, expect_cas, callback):
         # build command
         try:
             key_strs = []
@@ -965,21 +665,21 @@ class Connection:
 
         try:
             # Open connection if required
-            self.closed and (yield Task(self.connect))
+            conn.closed and (yield Task(conn.connect))
 
             # Add timeout for this request
-            self._add_timeout("Timeout on fetch '{0}'".format(name))
+            conn._add_timeout("Timeout on fetch '{0}'".format(name))
 
             result = {}
             # send command
 
             cmd = '{0} {1}\r\n'.format(name, ' '.join(key_strs))
-            _ = yield Task(self._stream.write, cmd)
+            _ = yield Task(conn._stream.write, cmd)
             # parse response
             while True:
-                line = yield Task(self._stream.read_until, "\r\n")
+                line = yield Task(conn._stream.read_until, "\r\n")
                 line = line[:-2]
-                self._raise_errors(line, name)
+                MemcachedParser._raise_errors(line, name)
 
                 if line == 'END':
                     break
@@ -989,10 +689,10 @@ class Connection:
                     else:
                         _, key, flags, size = line.split()
                     # read also \r\n
-                    value = yield Task(self._stream.read_bytes, int(size) + 2)
+                    value = yield Task(conn._stream.read_bytes, int(size) + 2)
                     value = value[:-2]
-                    if self._deserializer:
-                        value = self._deserializer(key, value, int(flags))
+                    if conn._deserializer:
+                        value = conn._deserializer(key, value, int(flags))
                     if expect_cas:
                         result[key] = (value, cas)
                     else:
@@ -1002,20 +702,22 @@ class Connection:
                     result[key] = value
                 else:
                     raise MemcacheUnknownError(line[:32])
+
         except Exception as err:
             if isinstance(err, (IOError, OSError)):
-                self.mark_dead(str(err))
-            if self._ignore_exc:
-                self._clear_timeout()
+                conn.mark_dead(str(err))
+            if conn._ignore_exc:
+                conn._clear_timeout()
                 callback({})
                 return
             raise
         #return result
-        self._clear_timeout()
+        conn._clear_timeout()
         callback(result)
 
+    @staticmethod
     @engine
-    def store_cmd(self, name, key, expire, noreply, data,
+    def store_cmd(conn, name, key, expire, noreply, data,
                   cas=None, callback=None):
         try:
             # process key
@@ -1029,8 +731,8 @@ class Connection:
             #         MemcacheIllegalInputError("Digit based cas was expected")
             # process data
             flags = 0
-            if self._serializer:
-                data, flags = self._serializer(key, data)
+            if conn._serializer:
+                data, flags = conn._serializer(key, data)
             data = str(data)
         except UnicodeEncodeError as e:
             raise MemcacheIllegalInputError(str(e))
@@ -1050,21 +752,21 @@ class Connection:
 
         try:
             # Open connection if required
-            self.closed and (yield Task(self.connect))
+            conn.closed and (yield Task(conn.connect))
 
             # Add timeout for this request
-            self._add_timeout("Timeout on fetch '{0}'".format(name))
+            conn._add_timeout("Timeout on fetch '{0}'".format(name))
 
-            yield Task(self._stream.write, cmd)
+            yield Task(conn._stream.write, cmd)
             if noreply:
-                self._clear_timeout()
+                conn._clear_timeout()
                 callback and callback(True)
                 return
 
-            line = yield Task(self._stream.read_until, "\r\n")
+            line = yield Task(conn._stream.read_until, "\r\n")
             line = line[:-2]
-            self._raise_errors(line, name)
-            self._clear_timeout()
+            MemcachedParser._raise_errors(line, name)
+            conn._clear_timeout()
 
             if line in VALID_STORE_RESULTS[name]:
                 if line == 'STORED':
@@ -1080,69 +782,43 @@ class Connection:
                 raise MemcacheUnknownError(line[:32])
         except Exception as err:
             if isinstance(err, (IOError, OSError)):
-                self.mark_dead(str(err))
-            if self._ignore_exc:
-                self._clear_timeout()
+                conn.mark_dead(str(err))
+            if conn._ignore_exc:
+                conn._clear_timeout()
                 callback and callback(None)
                 return
             raise
 
+    @staticmethod
     @engine
-    def misc_cmd(self, cmd, cmd_name, noreply, callback=None):
+    def misc_cmd(conn, cmd, cmd_name, noreply, callback=None):
 
         try:
             # Open connection if required
-            self.closed and (yield Task(self.connect))
+            conn.closed and (yield Task(conn.connect))
 
             # Add timeout for this request
-            self._add_timeout("Timeout on misc '{0}'".format(cmd_name))
+            conn._add_timeout("Timeout on misc '{0}'".format(cmd_name))
 
             # send command
-            yield Task(self._stream.write, cmd)
+            yield Task(conn._stream.write, cmd)
             if noreply:
-                self._clear_timeout()
+                conn._clear_timeout()
                 callback and callback(True)
                 return
 
             # wait for response
-            line = yield Task(self._stream.read_until, "\r\n")
-            self._raise_errors(line, cmd_name)
+            line = yield Task(conn._stream.read_until, "\r\n")
+            MemcachedParser._raise_errors(line, cmd_name)
 
         except Exception as err:
             if isinstance(err, (IOError, OSError)):
-                self.mark_dead(str(err))
-            if self._ignore_exc:
-                self._clear_timeout()
+                conn.mark_dead(str(err))
+            if conn._ignore_exc:
+                conn._clear_timeout()
                 callback and callback(None)
                 return
             raise
         # return result
-        self._clear_timeout()
+        conn._clear_timeout()
         callback and callback(line)
-
-    def read(self, rlen, callback):
-        """Read operation"""
-        self._stream.read_bytes(rlen, callback)
-
-    def readline(self, callback):
-        """Read a line"""
-        self._stream.read_until("\r\n", callback)
-
-    def expect(self, text, callback):
-        """Read a line and compare response with text"""
-        def _on_response(data):
-            if data[:-2] != text:
-                msg = "'%s' expected but '%s' received" % (text, data)
-                logging.warning(msg)
-            callback(data)
-        self.readline(_on_response)
-
-    def close(self):
-        """Close connection to MC"""
-        self._stream and self._stream.close()
-
-    def closed(self):
-        """Check connection status"""
-        if not self._stream:
-            return True
-        return self._stream and self._stream.closed()

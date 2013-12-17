@@ -10,7 +10,8 @@ import json
 
 # tornado testing stuff
 from tornado import testing
-from torncache import client as memcache
+from torncache import pool
+from torncache.protocols import memcached
 
 
 class ClientTest(testing.AsyncTestCase):
@@ -28,7 +29,7 @@ class ClientTest(testing.AsyncTestCase):
 
         super(ClientTest, self).setUp()
         servers = os.environ.get('MEMCACHED_URL', 'mc://127.0.0.1:11211')
-        self.pool = memcache.ClientPool(
+        self.pool = pool.ClientPool(
             servers=servers,
             ioloop=self.io_loop,
             serializer=_ser,
@@ -44,11 +45,11 @@ class ClientTest(testing.AsyncTestCase):
         self.assertTrue(result)
 
     def test_set_unicode_key(self):
-        with self.assertRaises(memcache.MemcacheIllegalInputError):
+        with self.assertRaises(memcached.MemcacheIllegalInputError):
             self.pool.set(u'\u0FFF', 'value', noreply=False)
 
     def test_set_unicode_value(self):
-        with self.assertRaises(memcache.MemcacheIllegalInputError):
+        with self.assertRaises(memcached.MemcacheIllegalInputError):
             self.pool.set('key', u'\u0FFF', noreply=False)
 
     def test_set_noreply(self):
@@ -112,7 +113,7 @@ class ClientTest(testing.AsyncTestCase):
         self.assertEqual(result, {'key1': 'value1', 'key2': 'value2'})
 
     def test_get_unicode_key(self):
-        with self.assertRaises(memcache.MemcacheIllegalInputError):
+        with self.assertRaises(memcached.MemcacheIllegalInputError):
             self.pool.get(u'\u0FFF')
 
     def test_delete_not_found(self):
