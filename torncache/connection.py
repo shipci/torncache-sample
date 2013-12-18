@@ -10,6 +10,7 @@ import os
 import stat
 import socket
 import time
+import numbers
 import logging
 import functools
 
@@ -77,17 +78,21 @@ class Connection(object):
             retval += " (dead until %d)" % self._dead_until
         return retval
 
-    def _add_timeout(self, reason):
+    def _add_timeout(self, reason, timeout=None):
         """Add a timeout handler"""
         def on_timeout():
             self._timeout = None
             self.mark_dead(reason)
             raise ConnectionTimeoutError(reason)
 
-        if self._request_timeout:
+        # Allow to override default timeout per call
+        if not isinstance(timeout, numbers.Integral):
+            timeout = self._request_timeout
+
+        if timeout:
             self._clear_timeout()
             self._timeout = self._ioloop.add_timeout(
-                time.time() + self._request_timeout,
+                time.time() + timeout,
                 stack_context.wrap(on_timeout))
 
     def _clear_timeout(self):
