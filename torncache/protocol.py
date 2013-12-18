@@ -21,9 +21,6 @@ except ImportError:
 # tornado requirements
 from tornado.ioloop import IOLoop
 
-# local requirements
-from torncache.connection import Connection
-
 
 class ProtocolError(Exception):
     """Resource exception"""
@@ -76,6 +73,7 @@ class ProtocolMixin(object):
     CLIENTS = weakref.WeakKeyDictionary()
     SCHEMES = []
     DEFAULT_PORT = None
+    CONNECTION = None
 
     def __init__(self, servers, ioloop=None,
                  serializer=None, deserializer=None,
@@ -111,14 +109,14 @@ class ProtocolMixin(object):
         #    3. Tuples of the form C{"path", weight} where path points to
         #    a local unix path
         for server in servers:
-            server = Connection(server, **self._server_args)
+            server = self.CONNECTION(server, **self._server_args)
             for i in xrange(server.weight):
                 self._buckets.append(server)
             self._servers.append(server)
 
     def _find_server(self, value):
         """Find a server from a string"""
-        if isinstance(value, Connection):
+        if isinstance(value, self.CONNECTION):
             return value
         # check if server is an address
         for candidate in self._servers:

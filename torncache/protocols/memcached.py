@@ -13,6 +13,7 @@ from tornado import stack_context
 from tornado.gen import engine, Task
 
 # Local requirements
+from torncache.connection import Connection
 from torncache.protocol import ProtocolMixin
 
 VALID_STORE_RESULTS = {
@@ -85,10 +86,15 @@ class MemcacheUnexpectedCloseError(MemcacheServerError):
     "Raised when the connection with memcached closes unexpectedly."
 
 
+class MemcachedConnection(Connection):
+    """Custom connection class to connect to Memcached servers"""
+
+
 class MemcachedProtocol(ProtocolMixin):
 
     SCHEMES = ['mc', 'memcached']
     DEFAULT_PORT = 11211
+    CONNECTION = MemcachedConnection
 
     def __init__(self, *args, **kwargs):
         super(MemcachedProtocol, self).__init__(*args, **kwargs)
@@ -665,7 +671,7 @@ class MemcachedParser(object):
 
         try:
             # Open connection if required
-            conn.closed and (yield Task(conn.connect))
+            conn.closed() and (yield Task(conn.connect))
 
             # Add timeout for this request
             conn._add_timeout("Timeout on fetch '{0}'".format(name))
@@ -677,8 +683,7 @@ class MemcachedParser(object):
             _ = yield Task(conn._stream.write, cmd)
             # parse response
             while True:
-                line = yield Task(conn._stream.read_until, "\r\n")
-                line = line[:-2]
+                line = yield Task(conn.read)
                 MemcachedParser._raise_errors(line, name)
 
                 if line == 'END':
@@ -689,8 +694,7 @@ class MemcachedParser(object):
                     else:
                         _, key, flags, size = line.split()
                     # read also \r\n
-                    value = yield Task(conn._stream.read_bytes, int(size) + 2)
-                    value = value[:-2]
+                    value = yield Task(conn.read, int(size))
                     if conn._deserializer:
                         value = conn._deserializer(key, value, int(flags))
                     if expect_cas:
@@ -752,19 +756,18 @@ class MemcachedParser(object):
 
         try:
             # Open connection if required
-            conn.closed and (yield Task(conn.connect))
+            conn.closed() and (yield Task(conn.connect))
 
             # Add timeout for this request
             conn._add_timeout("Timeout on fetch '{0}'".format(name))
 
-            yield Task(conn._stream.write, cmd)
+            yield Task(conn.write, cmd)
             if noreply:
                 conn._clear_timeout()
                 callback and callback(True)
                 return
 
-            line = yield Task(conn._stream.read_until, "\r\n")
-            line = line[:-2]
+            line = yield Task(conn.read)
             MemcachedParser._raise_errors(line, name)
             conn._clear_timeout()
 
@@ -795,20 +798,20 @@ class MemcachedParser(object):
 
         try:
             # Open connection if required
-            conn.closed and (yield Task(conn.connect))
+            conn.closed() and (yield Task(conn.connect))
 
             # Add timeout for this request
             conn._add_timeout("Timeout on misc '{0}'".format(cmd_name))
 
             # send command
-            yield Task(conn._stream.write, cmd)
+            yield Task(conn.write, cmd)
             if noreply:
                 conn._clear_timeout()
                 callback and callback(True)
                 return
 
             # wait for response
-            line = yield Task(conn._stream.read_until, "\r\n")
+            line = yield Task(conn.read)
             MemcachedParser._raise_errors(line, cmd_name)
 
         except Exception as err:

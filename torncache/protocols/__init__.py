@@ -1,5 +1,7 @@
 from __future__ import absolute_import
 
+import logging
+
 
 def __import(mod, names=None):
     """
@@ -7,14 +9,17 @@ def __import(mod, names=None):
     global scope.  (It is equivalent to 'from mod import <names>')
     """
     # No lazy importing, import everything immediately.
-    omod = __import__(mod, globals(), fromlist=names)
-    if names:
-        # from mod import <names>
-        for name in names:
-            globals()[name] = getattr(omod, name)
-    else:
-        # import mod
-        globals()[mod] = omod
+    try:
+        omod = __import__(mod, globals(), fromlist=names)
+        if names:
+            # from mod import <names>
+            for name in names:
+                globals()[name] = getattr(omod, name)
+        else:
+            # import mod
+            globals()[mod] = omod
+    except Exception as err:
+        logging.warning("Ignored protocol '{0}': {1}".format(mod, str(err)))
 
 
 def __find(path, expr="*.py*"):

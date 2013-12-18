@@ -52,7 +52,7 @@ class ClientPool(object):
         # Try to fetch protocol from parameters or infere from server details
         self._proto = Protocols.fetch(kwargs.get('protocol', servers))
         if self._proto is None:
-            raise ClientPoolError("No protocol specified")
+            raise ClientPoolError("Unkown protocol or protocol not specified")
         # parse server strings
         self._servers = self._proto.parse_servers(servers)
         self._size = size

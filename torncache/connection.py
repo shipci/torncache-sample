@@ -175,22 +175,23 @@ class Connection(object):
         """Send a MC command"""
         self._stream.write(cmd + "\r\n", callback)
 
-    def read(self, rlen, callback):
+    def write(self, data, callback):
+        """Write operation"""
+        self._stream.write(data, callback)
+
+    def read(self, rlen=None, callback=None):
         """Read operation"""
-        self._stream.read_bytes(rlen, callback)
+        on_response = lambda x: callback(x[:-2])
+        if rlen is None:
+            self._stream.read_until("\r\n", on_response)
+        else:
+            # Read and strip CRLF
+            rlen = rlen + 2  # CRLF
+            self._stream.read_bytes(rlen, on_response)
 
     def readline(self, callback):
         """Read a line"""
         self._stream.read_until("\r\n", callback)
-
-    def expect(self, text, callback):
-        """Read a line and compare response with text"""
-        def _on_response(data):
-            if data[:-2] != text:
-                msg = "'%s' expected but '%s' received" % (text, data)
-                logging.warning(msg)
-            callback(data)
-        self.readline(_on_response)
 
     def close(self):
         """Close connection to MC"""
