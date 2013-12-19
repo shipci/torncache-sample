@@ -91,3 +91,8 @@ class ClientPool(object):
             return self._BroadCast(self)
         # raise error
         raise AttributeError(name)
+
+    @property
+    def protocol(self):
+        """Get protocol used for this pool"""
+        return self._proto.SCHEMES
