@@ -137,12 +137,11 @@ class RedisProtocol(ProtocolMixin):
             retval = yield Task(self.parser.parse_response, conn, cmd, options)
 
         except Exception as err:
-            raise err
             if isinstance(err, (IOError, OSError)):
                 conn.mark_dead(str(err))
             if conn._ignore_exc:
                 conn._clear_timeout()
-                callback and callback(None)
+                callback and callback(err)
                 return
             raise
         #return result
