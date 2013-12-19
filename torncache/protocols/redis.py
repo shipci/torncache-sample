@@ -130,9 +130,9 @@ class RedisProtocol(ProtocolMixin):
             # Add timeout for this request
             conn._add_timeout("Timeout on command '{0}'".format(cmd), timeout)
             # parse command
-            cmd = self.parser.pack_command(*args)
+            data = self.parser.pack_command(*args)
             # send command
-            yield Task(self.parser.send_command, conn, cmd)
+            yield Task(self.parser.send_command, conn, data)
             # read response
             retval = yield Task(self.parser.parse_response, conn, cmd, options)
 
