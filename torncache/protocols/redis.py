@@ -64,8 +64,12 @@ class RedisParser(object):
             value = value.encode(self.encoding, self.encoding_errors)
         return value
 
-    def pack_command(self, *args):
+    def pack_command(self, conn, *args):
         "Pack a series of arguments into a value Redis command"
+
+        # Try serialization
+        if conn._serializer is not None:
+            args = [conn._serializer(arg) for arg in args]
         args_output = SYM_EMPTY.join([
             SYM_EMPTY.join((SYM_DOLLAR, b(str(len(k))), SYM_CRLF, k, SYM_CRLF))
             for k in itertools.imap(self.encode, args)])
@@ -87,6 +91,9 @@ class RedisParser(object):
             response = self.reader.gets()
         if command in self.response_callbacks:
             response = self.response_callbacks[command](response, **options)
+        # try deserialization
+        if conn._deserializer is not None:
+            response = conn._deserializer(response)
         callback(response)
 
 
@@ -130,7 +137,7 @@ class RedisProtocol(ProtocolMixin):
             # Add timeout for this request
             conn._add_timeout("Timeout on command '{0}'".format(cmd), timeout)
             # parse command
-            data = self.parser.pack_command(*args)
+            data = self.parser.pack_command(conn, *args)
             # send command
             yield Task(self.parser.send_command, conn, data)
             # read response
