@@ -78,6 +78,9 @@ class Connection(object):
             retval += " (dead until %d)" % self._dead_until
         return retval
 
+    def __del__(self):
+        self.close()
+
     def _add_timeout(self, reason, timeout=None):
         """Add a timeout handler"""
         def on_timeout():

@@ -114,6 +114,10 @@ class ProtocolMixin(object):
                 self._buckets.append(server)
             self._servers.append(server)
 
+    def __del__(self):
+        # Free connections
+        [server.close() for server in self._servers]
+
     def _find_server(self, value):
         """Find a server from a string"""
         if isinstance(value, self.CONNECTION):
