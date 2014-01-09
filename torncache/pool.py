@@ -112,10 +112,6 @@ class ClientPool(object):
         # raise error
         raise AttributeError(name)
 
-    def __del__(self):
-        # Remove all openned clients
-        [client.close() for client in self._clients]
-
     @property
     def protocol(self):
         """Get protocol used for this pool"""
