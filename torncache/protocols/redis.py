@@ -1205,7 +1205,8 @@ class RedisCommands(object):
     def script_load(self, script, callback=None):
         "Load a Lua ``script`` into the script cache. Returns the SHA."
         options = {'parse': 'LOAD', 'callback': callback}
-        return self._execute_command('SCRIPT', 'LOAD', script, **options)
+        self._execute_command('SCRIPT', 'LOAD', script, **options)
+
 
 
 class RedisProtocol(RedisCommands, ProtocolMixin):
@@ -1241,6 +1242,15 @@ class RedisProtocol(RedisCommands, ProtocolMixin):
             self.parser.response_callbacks,
             transaction,
             shard_hint)
+
+    def register_script(self, script):
+        """
+        Register a Lua ``script`` specifying the ``keys`` it will touch.
+        Returns a Script object that is callable and hides the complexity of
+        deal with scripts, keys, and shas. This is the preferred way to work
+        with Lua scripts.
+        """
+        return Script(self, script)
 
     @engine
     def _execute_command(self, *args, **options):
@@ -1589,7 +1599,7 @@ class Pipeline(RedisCommands):
     def load_scripts(self):
         # make sure all scripts that are about to be run on this pipeline exist
         scripts = list(self.scripts)
-        immediate = self.immediate__execute_command
+        immediate = self._immediate_execute_command
         shas = [s.sha for s in scripts]
         exists = immediate('SCRIPT', 'EXISTS', *shas, **{'parse': 'EXISTS'})
         if not all(exists):
@@ -1659,3 +1669,35 @@ class Pipeline(RedisCommands):
     def script_load_for_pipeline(self, script):
         "Make sure scripts are loaded prior to pipeline execution"
         self.scripts.add(script)
+
+
+class Script(object):
+    "An executable Lua script object returned by ``register_script``"
+
+    @engine
+    def __init__(self, registered_client, script):
+        self.registered_client = registered_client
+        self.script = script
+        self.sha = yield Task(registered_client.script_load, script)
+
+    @engine
+    def __call__(self, keys=[], args=[], client=None, callback=None):
+        "Execute the script, passing any required ``args``"
+        if client is None:
+            client = self.registered_client
+        args = tuple(keys) + tuple(args)
+        # make sure the Redis server knows about the script
+        if isinstance(client, Pipeline):
+            # make sure this script is good to go on pipeline
+            client.script_load_for_pipeline(self)
+        # compute
+        retval = None
+        try:
+            retval = yield Task(client.evalsha, self.sha, len(keys), *args)
+        except redis.NoScriptError:
+            # Maybe the client is pointed to a differnet server than the client
+            # that created this instance?
+            self.sha = yield Task(registered_client.script_load, script)
+            retval = yield Task(client.evalsha, self.sha, len(keys), *args)
+        # notify
+        callback and callback(retval)
