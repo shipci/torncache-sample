@@ -23,7 +23,7 @@ except ImportError:
 from tornado.ioloop import IOLoop
 
 # local requirements
-from torncache import distributions
+from torncache.distributions import Distribution
 
 class ProtocolError(Exception):
     """Resource exception"""
@@ -82,7 +82,7 @@ class ProtocolMixin(object):
                  serializer=None, deserializer=None,
                  connect_timeout=5, timeout=1, no_delay=True,
                  ignore_exc=True, dead_retry=30,
-                 hash_tags=None, distribution='ketama',
+                 hash_tags=None, distribution=None,
                  server_retries=10):
 
         # Watcher to destroy client when ioloop expires
@@ -105,8 +105,7 @@ class ProtocolMixin(object):
         self._servers = {}
         self._server_retries = server_retries
         # create dist and init servers
-        dist = distributions.find(distribution)
-        self.dist = dist(hash_tags=hash_tags)
+        self.dist = Distribution.create(distribution, hash_tags=hash_tags)
         self.connect(servers)
 
     def __del__(self):
@@ -124,7 +123,7 @@ class ProtocolMixin(object):
 
     def close(self):
         # Free resources
-        [server.close() for server in self._servers.iteritems()]
+        [server.close() for server in self._servers.itervalues()]
         self._servers = {}
         self.dist.clear()
 

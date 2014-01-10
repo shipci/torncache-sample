@@ -8,18 +8,12 @@ from __future__ import absolute_import
 
 import itertools
 
+# local requirements
+from torncache.distributions import Distribution
 
-class Random(object):
+
+class Random(Distribution):
     """Random distribution"""
-
-    def __init__(self, nodes=None, hash_tags=None):
-        self.htags = hash_tags
-        # clear and add nodes
-        self.clear()
-        self.add_nodes(nodes)
-
-    def __del__(self):
-        self.close()
 
     def add_nodes(self, nodes):
         nodes = nodes or {}
@@ -59,7 +53,7 @@ class Random(object):
         yield None
 
     def gen_key(self, key):
-        return hash(key)
+        return hash(super(Random, self).gen_key(key))
 
     def clear(self):
         # connection options

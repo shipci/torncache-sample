@@ -8,19 +8,15 @@ Random. Legacy sharding distribution algorithm
 
 from __future__ import absolute_import
 
-import re
 import bisect
 import hashlib
 
+# local requirements
+from torncache.distributions import Distribution
 
-class Ketama():
+
+class Ketama(Distribution):
     """A Ketama distribution mechanism"""
-
-    def __init__(self, nodes=None, hash_tags=None):
-        self.htags = hash_tags
-        # clear and add nodes
-        self.clear()
-        self.add_nodes(nodes)
 
     def add_nodes(self, objects):
         objects = objects or {}
@@ -129,7 +125,7 @@ class Ketama():
 
         md5 is currently used because it mixes well.
         """
-        b_key = self._hash_digest(key)
+        b_key = self._hash_digest(super(Ketama, self).gen_key(key))
         return self._hash_val(b_key, lambda x: x)
 
     def clear(self):
