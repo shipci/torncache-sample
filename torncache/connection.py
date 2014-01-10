@@ -111,6 +111,10 @@ class Connection(object):
             self._clear_timeout()
             self.close()
 
+    def is_alive(self):
+        """Check if server is alive"""
+        return self._dead_until < time.time()
+
     def connect(self, callback=None):
         """Open a connection to MC server"""
 

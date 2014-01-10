@@ -7,6 +7,7 @@ Protocol. A Base class to implement cached protocols
 from __future__ import absolute_import
 
 import os
+import re
 import socket
 import weakref
 import itertools
@@ -21,6 +22,8 @@ except ImportError:
 # tornado requirements
 from tornado.ioloop import IOLoop
 
+# local requirements
+from torncache import distributions
 
 class ProtocolError(Exception):
     """Resource exception"""
@@ -79,14 +82,16 @@ class ProtocolMixin(object):
                  serializer=None, deserializer=None,
                  connect_timeout=5, timeout=1, no_delay=True,
                  ignore_exc=True, dead_retry=30,
+                 hash_tags=None, distribution='ketama',
                  server_retries=10):
 
         # Watcher to destroy client when ioloop expires
         self._ioloop = ioloop or IOLoop.instance()
         self.CLIENTS[self._ioloop] = self
 
-        self._server_retries = server_retries
-        self._server_args = {
+        # srv args
+        self._conn = self.CONNECTION
+        self._conn_options = {
             'ioloop': self._ioloop,
             'serializer': serializer,
             'deserializer': deserializer,
@@ -96,79 +101,98 @@ class ProtocolMixin(object):
             'ignore_exc': ignore_exc,
             'dead_retry': dead_retry
         }
-
-        # servers
-        self._servers = []
-        self._buckets = []
-
-        # Servers can be passed in three forms:
-        #    1. Strings of the form C{"host:port"}, which implies a
-        #    default weight of 1.
-        #    2. Tuples of the form C{("host:port", weight)}, where C{weight} is
-        #    an integer weight value.
-        #    3. Tuples of the form C{"path", weight} where path points to
-        #    a local unix path
-        for server in servers:
-            server = self.CONNECTION(server, **self._server_args)
-            for i in xrange(server.weight):
-                self._buckets.append(server)
-            self._servers.append(server)
+        # srvs
+        self._servers = {}
+        self._server_retries = server_retries
+        # create dist and init servers
+        dist = distributions.find(distribution)
+        self.dist = dist(hash_tags=hash_tags)
+        self.connect(servers)
 
     def __del__(self):
         # Free connections
-        [server.close() for server in self._servers]
+        self.close()
+
+    def connect(self, servers):
+        # Connect to servers
+        nodes = {}
+        for name, server in servers:
+            server = self._conn(server, **self._conn_options)
+            self._servers[name] = server
+            nodes[name] = server.weight
+        self.dist.add_nodes(nodes)
+
+    def close(self):
+        # Free resources
+        [server.close() for server in self._servers.iteritems()]
+        self._servers = {}
+        self.dist.clear()
 
     def _find_server(self, value):
         """Find a server from a string"""
         if isinstance(value, self.CONNECTION):
             return value
-        # check if server is an address
-        for candidate in self._servers:
-            if str(candidate) == value:
+        # check if match server name or address
+        for name, candidate in self._servers.iteritems():
+            if str(candidate) == value or name == value:
                 return candidate
         # try with a key
         return self._get_server(value)[0]
 
     def _get_server(self, key):
-        """Fetch valid MC for this key"""
-        serverhash = 0
+        # fetch key
         if isinstance(key, tuple):
-            serverhash, key = key[:2]
-        elif len(self._buckets) > 1:
-            serverhash = hash(key)
+            _, key = key[:2]
         # get pair server, key
-        return (self._buckets[serverhash % len(self._buckets)], key)
+        for i in xrange(self._server_retries):
+            for name in self.dist.iterate_nodes(key):
+                if name is None:
+                    # No servers alive
+                    return None, None
+                server = self._servers[name]
+                if server.is_alive():
+                    return server, key
+        return None, None
 
     @classmethod
     def parse_servers(cls, servers):
-        _servers = servers or []
+        _servers = []
+
         # Parse servers if it's a collection of urls
+        servers = servers or []
         if isinstance(servers, basestring):
-            _servers = []
-            for server in servers.split(','):
-                # parse url form 'mc://host:port?<weight>='
-                if any(itertools.imap(server.startswith, cls.SCHEMES)):
-                    url = urlparse.urlsplit(server)
-                    server = url.netloc or url.path
-                    if url.query:
-                        weight = urlparse.parse_qs(url.query).get('weight', 1)
-                        server = [server, weight]
-                _servers.append(server)
+            servers = servers.split(',')
+
+        for server in servers:
+            # parse url form 'mc://host:port?<weight>='
+            if any(itertools.imap(server.startswith, cls.SCHEMES)):
+                url = urlparse.urlsplit(server)
+                server = url.netloc or url.path
+                params = urlparse.parse_qs(url.query)
+                server = [params.get('name'), (server, params.get('weight'))]
+            # twemproxy like string
+            else:
+                rx = '(?P<host>\w+(:\d+)?)(:(?P<weight>\d+))?( (?P<name>.*))?'
+                matchs = re.match(rx, server).groups
+                server = (matchs('name'), (matchs('host'), matchs('weight')))
+            # Append
+            _servers.append(server)
+
         # add port to tuples if missing
         retval = {}
-        for host in _servers:
+        for name, host in _servers:
             weight, port = 1, cls.DEFAULT_PORT
             # extract host and weight from tuple
             if not isinstance(host, basestring):
                 if len(host) > 1:
-                    weight = host[1]
+                    weight = host[1] or 1
                 host = host[0]
             # extract host and port
             if ':' in host:
                 host, _, port = host.partition(':')
             # unix socket ?
             if os.path.exists(host):
-                retval[host] = weight
+                retval[name or host] = (host, weight)
             else:
                 # resolve host
                 candidates = socket.getaddrinfo(
@@ -176,8 +200,8 @@ class ProtocolMixin(object):
                     socket.AF_INET, socket.SOCK_STREAM)
                 for candidate in candidates:
                     host = "{0}:{1}".format(*candidate[4])
-                    weight = retval.get(host, weight - 1)
-                    retval[host] = weight + 1
+                    _, weight = retval.get(name or host, (None, weight - 1))
+                    retval[name or host] = (host, weight + 1)
         # Return well formatted list of servers
         return retval.items()
 
