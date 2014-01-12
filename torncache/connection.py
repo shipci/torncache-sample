@@ -207,7 +207,12 @@ class Connection(object):
 
     def close(self):
         """Close connection to MC"""
-        self._stream and self._stream.close()
+        try:
+            self._stream and self._stream.close()
+        except RuntimeError:
+            # IOPool is closing, no a close call is not needed
+            # afterall. Igore this
+            pass
 
     def closed(self):
         """Check connection status"""
