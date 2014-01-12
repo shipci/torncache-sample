@@ -1219,10 +1219,12 @@ class RedisProtocol(RedisCommands, ProtocolMixin):
         super(RedisProtocol, self).__init__(*args, **kwargs)
         self.parser = RedisParser(**kwargs)
 
-    def _get_server(self, *args, **options):
-        connection, cmd, args = None, None, args
-        if isinstance(args[0], basestring) or type(args[0]) in (tuple, list):
-            connection, cmd = super(RedisProtocol, self)._get_server(args[0])
+    def _get_redis_server(self, *args, **options):
+        assert args
+        if isinstance(args[0], basestring):
+            sharding = args[1] if len(args) > 1 else None
+            cmd, sharding = args[0], options.pop('shard_hint', sharding)
+            connection, _ = self._get_server(sharding)
         else:
             connection = args.pop(0)
             cmd = args[0]
@@ -1252,12 +1254,26 @@ class RedisProtocol(RedisCommands, ProtocolMixin):
         """
         return Script(self, script)
 
+    def shard(self, keys, as_pipes=False, **pipe_kwargs):
+        """
+        Group keys based on expected server. By defauult return keys
+        grouped by server, but if as_pipes is present, it also returns a ready
+        to use pipe"""
+        client, pipes = self._shard(keys), []
+        if as_pipes is False:
+            return list(client.itervalues())
+        pipes = {}
+        for _, keys in client.iteritems():
+            pipe_kwargs['shard_hint'] = keys[0]
+            pipes.setdefault(self.pipeline(**pipe_kwargs), keys)
+        return pipes
+
     @engine
     def _execute_command(self, *args, **options):
         "Execute a command and return a parsed response"
 
         # first arg could be a command or a connection
-        conn, cmd, args = self._get_server(*args, **options)
+        conn, cmd, args = self._get_redis_server(*args, **options)
         # get callback
         callback = options.pop('callback', None)
         # get timeout
@@ -1401,7 +1417,10 @@ class Pipeline(RedisCommands):
 
         # if this is the first call, we need a connection
         if not conn:
-            conn, _, _ = self.protocol._get_server([self.shard_hint, cmd])
+            conn, _, _ = self.protocol._get_redis_server(
+                cmd,
+                shard_hint=self.shard_hint
+            )
             # assign to self.connection so reset() releases the connection
             # back to the pool after we're done
             self.connection = conn
@@ -1624,7 +1643,10 @@ class Pipeline(RedisCommands):
 
         conn = self.connection
         if not conn:
-            conn, _, _ = self.protocol._get_server([self.shard_hint, 'MULTI'])
+            conn, _, _ = self.protocol._get_redis_server(
+                self.__class__.__name__,
+                shard_hint=self.shard_hint
+            )
             # assign to self.connection so reset() releases the connection
             # back to the pool after we're done
             self.connection = conn

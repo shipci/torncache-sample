@@ -139,9 +139,6 @@ class ProtocolMixin(object):
         return self._get_server(value)[0]
 
     def _get_server(self, key):
-        # fetch key
-        if isinstance(key, tuple):
-            _, key = key[:2]
         # get pair server, key
         for i in xrange(self._server_retries):
             for name in self.dist.iterate_nodes(key):
@@ -152,6 +149,15 @@ class ProtocolMixin(object):
                 if server.is_alive():
                     return server, key
         return None, None
+
+    def _shard(self, keys):
+        keys = ",".split(keys) if isinstance(keys, basestring) else keys
+        retval = {}
+        for key in keys:
+            server, _ = self._get_server(key)
+            retval.setdefault(server, []).append(key)
+        return retval
+
 
     @classmethod
     def parse_servers(cls, servers):

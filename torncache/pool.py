@@ -105,6 +105,8 @@ class ClientPool(object):
             return self._get_client().pipeline
         if name == 'register_script':
             return self._get_client().register_script
+        if name == 'shard':
+            return self._get_client().shard
         if name == 'broadcast':
             return self._BroadCast(self)
         if hasattr(self._proto, name):
