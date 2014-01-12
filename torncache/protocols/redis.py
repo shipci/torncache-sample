@@ -40,6 +40,10 @@ class RedisWatchError(RedisError):
     """Error while watching key"""
 
 
+class RedisNoScriptError(RedisError):
+    """No Script is found with provided SHA1"""
+
+
 class RedisConnection(Connection):
     """Custom connection to redis servers"""
 
@@ -61,6 +65,8 @@ class RedisParser(object):
         if not self.response_callbacks:
             callbacks = redis.client.StrictRedis.RESPONSE_CALLBACKS
             self.response_callbacks = callbacks
+            # Add extra parsers
+            self.response_callbacks.setdefault('EVALSHA', self.parse_evalsha)
 
     def encode(self, value):
         "Return a bytestring representation of the value"
@@ -106,6 +112,14 @@ class RedisParser(object):
             response = conn._deserializer(response)
         callback(response)
 
+    ### PARSERS ###
+    @staticmethod
+    def parse_evalsha(response):
+        if isinstance(response, hiredis.ReplyError):
+            msg = str(response)
+            if msg.startswith('NOSCRIPT'):
+                raise RedisNoScriptError(msg)
+        return response
 
 class RedisCommands(object):
     """Redis commands helpers"""
@@ -1192,21 +1206,38 @@ class RedisCommands(object):
         options = {'parse': 'EXISTS', 'callback': kwargs.get('callback')}
         self._execute_command('SCRIPT', 'EXISTS', *args, **options)
 
-    def script_flush(self, callback=None):
+    def script_flush(self, **options):
         "Flush all scripts from the script cache"
-        options = {'parse': 'FLUSH', 'callback': callback}
+        options.setdefault('parse', 'FLUSH')
         self._execute_command('SCRIPT', 'FLUSH', **options)
 
-    def script_kill(self, callback=None):
+    def script_kill(self, **options):
         "Kill the currently executing Lua script"
-        options = {'parse': 'KILL', 'callback': callback}
+        options.setdefault('parse', 'KILL')
         self._execute_command('SCRIPT', 'KILL', **options)
 
-    def script_load(self, script, callback=None):
+    def script_load(self, script, **options):
         "Load a Lua ``script`` into the script cache. Returns the SHA."
-        options = {'parse': 'LOAD', 'callback': callback}
+        options.setdefault('parse', 'LOAD')
         self._execute_command('SCRIPT', 'LOAD', script, **options)
 
+    def script_run(self, name, keys=[], args=[], **options):
+        """
+        Run a script of server specified by shard_hint. If not present,
+        use first key as hint
+
+        """
+        server, _ = self._get_server(options.get('shard_hint', keys[0]))
+        try:
+            script = server.script_instances.get(name)
+        except AttributeError:
+            script, server.script_instances = None, {}
+        finally:
+            if script is None:
+                script = self.register_script(self.scripts[name])
+                server.script_instances[name] = script
+        # run it
+        script(keys, args, **options)
 
 
 class RedisProtocol(RedisCommands, ProtocolMixin):
@@ -1216,8 +1247,9 @@ class RedisProtocol(RedisCommands, ProtocolMixin):
     CONNECTION = RedisConnection
 
     def __init__(self, *args, **kwargs):
-        super(RedisProtocol, self).__init__(*args, **kwargs)
         self.parser = RedisParser(**kwargs)
+        self.scripts = kwargs.pop('scripts', {})
+        super(RedisProtocol, self).__init__(*args, **kwargs)
 
     def _get_redis_server(self, *args, **options):
         assert args
@@ -1294,6 +1326,8 @@ class RedisProtocol(RedisCommands, ProtocolMixin):
         except Exception as err:
             if isinstance(err, (IOError, OSError)):
                 conn.mark_dead(str(err))
+            if isinstance(err, RedisNoScriptError):
+                raise
             if conn._ignore_exc:
                 conn._clear_timeout()
                 callback and callback(err)
@@ -1439,6 +1473,8 @@ class Pipeline(RedisCommands):
         except Exception as err:
             if isinstance(err, (IOError, OSError)):
                 conn.mark_dead(str(err))
+            if isinstance(err, RedisNoScriptError):
+                raise
             if isinstance(err, ConnectionError):
                 conn.close()
             # reset conn
@@ -1696,18 +1732,15 @@ class Pipeline(RedisCommands):
 class Script(object):
     "An executable Lua script object returned by ``register_script``"
 
-    @engine
-    def __init__(self, registered_client, script):
+    def __init__(self, registered_client, script=None, sha=None):
         self.registered_client = registered_client
         self.script = script
-        self.sha = yield Task(registered_client.script_load, script)
+        self.sha = sha
 
     @engine
     def __call__(self, keys=[], args=[], client=None, callback=None):
         "Execute the script, passing any required ``args``"
-        if client is None:
-            client = self.registered_client
-        args = tuple(keys) + tuple(args)
+        client = client or self.registered_client
         # make sure the Redis server knows about the script
         if isinstance(client, Pipeline):
             # make sure this script is good to go on pipeline
@@ -1715,11 +1748,13 @@ class Script(object):
         # compute
         retval = None
         try:
-            retval = yield Task(client.evalsha, self.sha, len(keys), *args)
-        except redis.NoScriptError:
+            data = itertools.chain(keys, args)
+            retval = yield Task(client.evalsha, self.sha, len(keys), *data)
+        except RedisNoScriptError:
             # Maybe the client is pointed to a differnet server than the client
             # that created this instance?
-            self.sha = yield Task(registered_client.script_load, script)
-            retval = yield Task(client.evalsha, self.sha, len(keys), *args)
+            self.sha = yield Task(client.script_load, self.script)
+            data = itertools.chain(keys, args)
+            retval = yield Task(client.evalsha, self.sha, len(keys), *data)
         # notify
         callback and callback(retval)
