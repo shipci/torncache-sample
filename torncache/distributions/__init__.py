@@ -6,15 +6,20 @@ import re
 
 __all__ = ['Distribution']
 
+
 class Distribution(object):
 
     def __init__(self, nodes=None, hash_tags=None):
         # Htags support
         self.htags_re = None
+        self.htags_template = None
         self.htags = hash_tags
+
+        # Compute Htags helper
         if hash_tags and len(hash_tags) == 2:
             self.htags_re = hash_tags[0] + '(?P<key>.*)}' + hash_tags[1]
             self.htags_re = re.compile(self.htags_re)
+            self.htags_template = hash_tags[0] + '{0}' + hash_tags[1]
 
         # clear and add nodes
         self.clear()
@@ -37,6 +42,14 @@ class Distribution(object):
         if self.htags_re:
             match = self.htags_re.match(key)
         return match.groups('key') if match else key
+
+    def tag_key(self, key):
+        if self.htags_template:
+            return self.tags.template.format(key)
+        return key
+
+    def untag_key(self, key):
+        return self.gen_key(key)
 
     def clear(self):
         raise NotImplementedError

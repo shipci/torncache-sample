@@ -6,6 +6,7 @@ Torncache Pool
 
 from __future__ import absolute_import
 
+import weakref
 import functools
 import collections
 
@@ -56,7 +57,7 @@ class ClientPool(object):
         # parse server strings
         self._servers = self._proto.parse_servers(servers)
         self._size = size
-        self._used = collections.deque()
+        self._used = weakref.WeakSet()
         self._clients = collections.deque()
         # Client arguments
         self._kwargs = kwargs
@@ -64,7 +65,9 @@ class ClientPool(object):
     def _create_clients(self, n):
         return [self._proto(self._servers, **self._kwargs) for x in xrange(n)]
 
-    def _get_client(self):
+    def _get_client(self, private=False, shared=False):
+        if private:
+            return self._create_clients(1)[0]
         if not self._clients:
             # Add a new client
             total_clients = len(self._clients) + len(self._used)
@@ -73,8 +76,14 @@ class ClientPool(object):
                 raise ClientPoolError(error)
             self._clients.append(*self._create_clients(1))
         # fetch available one
-        client = self._clients.popleft()
-        self._used.append(client)
+        if shared:
+            # If shared, it's expected that we are not going to use
+            # connection functionality from client, for example, for
+            # key tag stuff
+            client = self._clients[0]
+        else:
+            client = self._clients.popleft()
+            self._used.add(client)
         return client
 
     def _free_client(self, client):
@@ -101,14 +110,15 @@ class ClientPool(object):
         getattr(client, cmd)(*args, **kwargs)
 
     def __getattr__(self, name):
+        if name in ('shard', 'register_script'):
+            return getattr(self._get_client(private=True), name)
+        if name in ('tag_key', 'untag_key'):
+            return getattr(self._get_client(shared=True).dist, name)
         if name == 'pipeline':
             return self._get_client().pipeline
-        if name == 'register_script':
-            return self._get_client().register_script
-        if name == 'shard':
-            return self._get_client().shard
         if name == 'broadcast':
             return self._BroadCast(self)
+        # common case
         if hasattr(self._proto, name):
             return functools.partial(self._invoke, name)
         # raise error
