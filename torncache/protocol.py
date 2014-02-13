@@ -25,8 +25,13 @@ from tornado.ioloop import IOLoop
 # local requirements
 from torncache.distributions import Distribution
 
+
 class ProtocolError(Exception):
     """Resource exception"""
+
+
+class ProtocolStop(Exception):
+    """Notify about a cancellation request"""
 
 
 class Protocols(object):
@@ -101,6 +106,9 @@ class ProtocolMixin(object):
             'ignore_exc': ignore_exc,
             'dead_retry': dead_retry
         }
+        # Set to true if client can be cancelled
+        self._cancellable = False
+
         # srvs
         self._servers = {}
         self._server_retries = server_retries
@@ -126,6 +134,12 @@ class ProtocolMixin(object):
         [server.close() for server in self._servers.itervalues()]
         self._servers = {}
         self.dist.clear()
+
+    def cancel(self):
+        # Stop operation is progress
+        if self._cancellable:
+            raise ProtocolStop(self)
+        raise ProtocolError("Operation not cancellable")
 
     def _find_server(self, value):
         """Find a server from a string"""

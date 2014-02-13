@@ -8,11 +8,12 @@ from __future__ import absolute_import
 
 import weakref
 import functools
+import contextlib
 import collections
 
 
 # local requirements
-from torncache.protocol import Protocols
+from torncache.protocol import Protocols, ProtocolStop
 
 
 class ClientPoolError(Exception):
@@ -108,6 +109,17 @@ class ClientPool(object):
         cb = kwargs.get('callback')
         kwargs['callback'] = functools.partial(on_finish, c=client, _cb=cb)
         getattr(client, cmd)(*args, **kwargs)
+
+    @contextlib.contextmanager
+    def client(self):
+        try:
+            client = self._get_client(private=True)
+            client._cancellable = True
+            yield client
+        except ProtocolStop:
+            pass
+        finally:
+            del client
 
     def __getattr__(self, name):
         if name in ('shard', 'register_script'):
