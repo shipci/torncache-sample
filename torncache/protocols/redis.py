@@ -82,14 +82,10 @@ class RedisParser(object):
 
     def pack_command(self, conn, *args):
         "Pack a series of arguments into a value Redis command"
+
         # Try serialization
-        def may_serialize(x):
-            return x if type(x) in (basestring, int) else conn._serializer(x)
         if conn._serializer is not None:
-            # Ommit serialization for integers and strings. We have no
-            # way to distinguis between REDIS commands and values,
-            # whis is what we want to serialize
-            args = [may_serialize(arg) for arg in args]
+            args = [conn._serializer(arg) for arg in args]
         args_output = SYM_EMPTY.join([
             SYM_EMPTY.join((SYM_DOLLAR, b(str(len(k))), SYM_CRLF, k, SYM_CRLF))
             for k in itertools.imap(self.encode, args)])
