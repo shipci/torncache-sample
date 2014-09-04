@@ -6,9 +6,9 @@ env:
   - MEMCACHED_URL=mc://localhost:11211 TOX_ENV=py27
   - MEMCACHED_URL=mc://localhost:11211 TOX_ENV=py27-opt
   - MEMCACHED_URL=mc://localhost:11211 TOX_ENV=pypy
-  - hello = "Hello World This is a Sucess"
+  - hello="Hello World This is a Sucess"
 install:
   - pip install tox
 script:
   - tox -e $'TOX_ENV'
-  - echo $hello
+  - echo '$hello'
