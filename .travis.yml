@@ -4,8 +4,8 @@ services:
   - memcached
 env:
   - MEMCACHED_URL=mc://localhost:11211 TOX_ENV=py27
-  - MEMCACHED_URL=mc://localhost:11211 TOX_ENV=py27-opt
-  - MEMCACHED_URL=mc://localhost:11211 TOX_ENV=pypy
+  #- MEMCACHED_URL=mc://localhost:11211 TOX_ENV=py27-opt
+ # - MEMCACHED_URL=mc://localhost:11211 TOX_ENV=pypy
   
   
 install:
