@@ -1,6 +1,8 @@
 torncache
 =========
 
+delete yml
+
 
 
 [![Build Status](https://travis-ci.org/inean/torncache.png?branch=master)](https://travis-ci.org/inean/torncache)
