@@ -6,8 +6,6 @@ env:
   - MEMCACHED_URL=mc://localhost:11211 TOX_ENV=py27
   - MEMCACHED_URL=mc://localhost:11211 TOX_ENV=py27-opt
   - MEMCACHED_URL=mc://localhost:11211 TOX_ENV=pypy
-  
-  
 install:
   - pip install tox
 script:
@@ -15,4 +13,4 @@ script:
 
 notifications:
   email: false
-cache: true
+#cache: true
